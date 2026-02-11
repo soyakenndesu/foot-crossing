@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>M5StickC 足組みデータ取得（1/6）</title>
+
+<style>
+body {
+  font-family: 'Arial', sans-serif;
+  background:#eaf7f3;
+  color:#004d40;
+  text-align:center;
+  margin:0;
+  padding:0;
+}
+h1 {
+  background:#a7ffeb;
+  margin:0;
+  padding:18px 0;
+  border-radius:0 0 14px 14px;
+}
+.controls { margin:12px 0; }
+button {
+  font-size:15px;
+  padding:8px 16px;
+  margin:6px;
+  border-radius:8px;
+  border:none;
+  background:#26a69a;
+  color:#fff;
+  cursor:pointer;
+}
+#status1,#status2 { font-weight:bold; margin-top:10px; }
+pre {
+  display:inline-block;
+  background:#b2dfdb;
+  padding:8px 14px;
+  border-radius:10px;
+}
+#guessDisplay {
+  font-size:48px;
+  font-weight:bold;
+  margin-top:20px;
+  color:#d32f2f;
+}
+#declareDisplay {
+  font-size:22px;
+  font-weight:bold;
+  margin-top:10px;
+}
+#countdownDisplay {
+  font-size:36px;
+  font-weight:bold;
+  margin-top:10px;
+}
+</style>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+</head>
+
+<body>
+
+<h1>M5StickC 足組みデータ取得（1/6）</h1>
+
+<div class="controls">
+  <button onclick="connect(1)">右足 接続</button>
+  <button onclick="connect(2)">左足 接続</button>
+  <button onclick="calibrate()">キャリブレーション</button>
+  <button onclick="downloadExcel()">Excel</button>
+</div>
+
+<div class="controls">
+  <button onclick="toggleDeclare('R')">右 宣言</button>
+  <button onclick="toggleDeclare('L')">左 宣言</button>
+</div>
+
+<div class="controls">
+  <button onclick="runRepeat()">N5秒 → 足組み10秒 ×10回</button>
+</div>
+
+<div id="status1">右足: 未接続</div>
+<pre id="values1">Pitch:0.00 Roll:0.00</pre>
+
+<div id="status2">左足: 未接続</div>
+<pre id="values2">Pitch:0.00 Roll:0.00</pre>
+
+<div id="guessDisplay">判定: 通常座位</div>
+<div id="declareDisplay">宣言: なし</div>
+<div id="countdownDisplay"></div>
+
+<script>
+/* ===== UUID ===== */
+const serviceUUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+const charUUID    = "beb5483e-36e1-4688-b7f5-ea073f74076a";
+
+/* ===== 閾値 ===== */
+const THRESHOLD = 29.25;
+
+/* ===== 状態 ===== */
+let latestRight=[0,0], latestLeft=[0,0];
+let baseRight=null, baseLeft=null;
+let declaration="none";
+let phase="idle"; // idle / N / cross
+
+/* ===== Excel ===== */
+let accelData=[[
+  "Time",
+  "Right_P","Right_R","Sita_R",
+  "Left_P","Left_R","Sita_L",
+  "Declaration",
+  "Posture",
+  "Phase"
+]];
+
+/* ===== 宣言 ===== */
+function toggleDeclare(side){
+  declaration = (declaration===side) ? "none" : side;
+  declareDisplay.textContent =
+    "宣言: " + (declaration==="none" ? "なし" : declaration);
+}
+
+/* ===== BLE ===== */
+async function connect(id){
+  const device = await navigator.bluetooth.requestDevice({
+    acceptAllDevices:true,
+    optionalServices:[serviceUUID]
+  });
+
+  const server = await device.gatt.connect();
+  const service = await server.getPrimaryService(serviceUUID);
+  const char = await service.getCharacteristic(charUUID);
+  await char.startNotifications();
+
+  char.addEventListener("characteristicvaluechanged", e => {
+    const [p,r] = new TextDecoder()
+      .decode(e.target.value)
+      .trim()
+      .split(",")
+      .map(Number);
+
+    if(isNaN(p) || isNaN(r)) return;
+
+    if(id===1){
+      latestRight=[p,r];
+      values1.textContent=`Pitch:${p.toFixed(2)} Roll:${r.toFixed(2)}`;
+    }else{
+      latestLeft=[p,r];
+      values2.textContent=`Pitch:${p.toFixed(2)} Roll:${r.toFixed(2)}`;
+    }
+
+    /* ===== sita1 計算（Arduinoと同一） ===== */
+    const sitaR = (1 - (Math.cos(latestRight[0]*Math.PI/180) *
+                        Math.cos(latestRight[1]*Math.PI/180))) * 100;
+
+    const sitaL = (1 - (Math.cos(latestLeft[0]*Math.PI/180) *
+                        Math.cos(latestLeft[1]*Math.PI/180))) * 100;
+
+    /* ===== 二値判定 ===== */
+    let posture = "N";
+    if(sitaR > THRESHOLD || sitaL > THRESHOLD){
+      posture = "CROSS";
+    }
+
+    guessDisplay.textContent =
+      "判定: " + (posture==="N" ? "通常座位" : "足組み");
+
+    accelData.push([
+      new Date().toLocaleTimeString(),
+      latestRight[0], latestRight[1], sitaR.toFixed(2),
+      latestLeft[0],  latestLeft[1],  sitaL.toFixed(2),
+      declaration,
+      posture,
+      phase
+    ]);
+  });
+
+  document.getElementById("status"+id).textContent =
+    `${id===1?"右":"左"}足 接続完了`;
+}
+
+/* ===== キャリブレーション ===== */
+function calibrate(){
+  baseRight=[...latestRight];
+  baseLeft =[...latestLeft];
+  alert("キャリブレーション完了");
+}
+
+/* ===== 繰り返し制御 ===== */
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+async function countdown(sec){
+  for(let i=sec;i>0;i--){
+    countdownDisplay.textContent=i;
+    await sleep(1000);
+  }
+  countdownDisplay.textContent="";
+}
+
+async function runRepeat(){
+  for(let i=1;i<=10;i++){
+    phase="N";
+    document.body.style.background="#eaf7f3";
+    await countdown(5);
+
+    phase="cross";
+    document.body.style.background="#ffcccc";
+    await countdown(10);
+  }
+  phase="idle";
+  document.body.style.background="#eaf7f3";
+  countdownDisplay.textContent="完了";
+}
+
+/* ===== Excel ===== */
+function downloadExcel(){
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(accelData);
+  XLSX.utils.book_append_sheet(wb, ws, "Data");
+  XLSX.writeFile(wb, "foot_data_sita1.xlsx");
+}
+</script>
+
+</body>
+</html>
